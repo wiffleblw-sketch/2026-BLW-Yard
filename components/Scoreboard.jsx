@@ -1183,10 +1183,10 @@ function ManageView({ teams, setTeams, players, setPlayers, games, setGames, pas
         <button className={`mtab ${tab === 'data' ? 'is-active' : ''}`} onClick={() => setTab('data')}>Data</button>
       </div>
 
-      {tab === 'games' && <GamesManager teams={teams} games={games} setGames={setGamesM} pas={pas} setPAs={setPAsM} pitching={pitching} setPitching={setPitchingM} openGame={openGame} />}
-      {tab === 'pa' && <PAEntry teams={teams} players={players} games={games} pas={pas} setPAs={setPAsM} />}
-      {tab === 'pitch' && <PitchingEntry teams={teams} players={players} games={games} pitching={pitching} setPitching={setPitchingM} />}
-      {tab === 'players' && <PlayersManager teams={teams} setTeams={setTeamsM} players={players} setPlayers={setPlayersM} />}
+      {tab === 'games' && <GamesManager teams={teams} games={games} setGames={setGames} pas={pas} setPAs={setPAs} pitching={pitching} setPitching={setPitching} openGame={openGame} />}
+      {tab === 'pa' && <PAEntry teams={teams} players={players} games={games} pas={pas} setPAs={setPAs} />}
+      {tab === 'pitch' && <PitchingEntry teams={teams} players={players} games={games} pitching={pitching} setPitching={setPitching} />}
+      {tab === 'players' && <PlayersManager teams={teams} setTeams={setTeams} players={players} setPlayers={setPlayers} />}
       {tab === 'data' && <DataManager resetAll={resetAll} clearAll={clearAll} games={games} pas={pas} pitching={pitching} players={players} teams={teams} />}
     </div>
   );
