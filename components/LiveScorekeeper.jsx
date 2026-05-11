@@ -4,6 +4,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import {
   createGame, setLineup, setStarter, startGame, computeState,
   paEvent, pitchingChangeEvent, substitutionEvent, endHalfEvent, endGameEvent,
+  manualAdvanceEvent, manualRunEvent, manualOutEvent,
   PA_RESULTS,
 } from '../lib/livegame';
 import { TEAM_LOGOS } from '../lib/logos';
@@ -487,7 +488,25 @@ function ScoringScreen({ game, teams, players, canEdit, busy, error, onAppendEve
 
           <div className="now-pitching">
             <div className="now-label">PITCHING</div>
-            <div className="now-pitcher">{currentPitcher?.name || '—'}</div>
+            {canEdit ? (
+              <select
+                value={state.currentPitcherId || ''}
+                onChange={async (e) => {
+                  const newPid = e.target.value;
+                  if (newPid && newPid !== state.currentPitcherId) {
+                    await onAppendEvents([pitchingChangeEvent({ team: state.fieldingSide, pitcherId: newPid })]);
+                  }
+                }}
+                className="now-pitcher-select"
+              >
+                <option value="">— pick pitcher —</option>
+                {players.filter(p => p.teamId === fieldingTeam.id).map(p => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            ) : (
+              <div className="now-pitcher">{currentPitcher?.name || '—'}</div>
+            )}
             <div className="now-meta">{fieldingTeam?.abbr}</div>
           </div>
         </div>
@@ -532,6 +551,18 @@ function ScoringScreen({ game, teams, players, canEdit, busy, error, onAppendEve
             </label>
           </div>
         </div>
+      )}
+
+      {/* MANUAL ADJUSTMENTS */}
+      {canEdit && !state.isOver && (
+        <ManualAdjustments
+          state={state}
+          runners={runners}
+          fieldingSide={state.fieldingSide}
+          battingSide={state.battingSide}
+          getPlayer={getPlayer}
+          onAppendEvents={onAppendEvents}
+        />
       )}
 
       {/* GAME CONTROLS */}
@@ -615,6 +646,18 @@ function RecentPlay({ ev, getPlayer }) {
     const p = getPlayer(ev.playerId);
     return <li className="recent-play recent-play-sub">SUB → {p?.name || ev.playerId}</li>;
   }
+  if (ev.type === 'manual_advance') {
+    const r = getPlayer(ev.runnerId);
+    const dest = ev.to === 'home' ? 'SCORED' : ev.to === 'out' ? 'OUT' : `to ${ev.to}`;
+    return <li className="recent-play recent-play-sub">MANUAL: {r?.name || ev.runnerId} {dest}</li>;
+  }
+  if (ev.type === 'manual_run') {
+    return <li className="recent-play recent-play-sub">MANUAL RUN {ev.delta > 0 ? '+' : ''}{ev.delta || 1}</li>;
+  }
+  if (ev.type === 'manual_out') {
+    const r = getPlayer(ev.runnerId);
+    return <li className="recent-play recent-play-sub">MANUAL OUT: {r?.name || ev.runnerId}</li>;
+  }
   if (ev.type === 'end_half') {
     return <li className="recent-play recent-play-sub">— end of half —</li>;
   }
@@ -622,6 +665,82 @@ function RecentPlay({ ev, getPlayer }) {
     return <li className="recent-play recent-play-sub">— game ended —</li>;
   }
   return null;
+}
+
+function ManualAdjustments({ state, runners, fieldingSide, battingSide, getPlayer, onAppendEvents }) {
+  const bases = ['1B', '2B', '3B'];
+  const occupied = bases.filter(b => runners[b]);
+
+  // Move runner: pick base → pick destination (other base, home, or out)
+  const move = async (from, to) => {
+    const runner = state.bases[from];
+    if (!runner) return;
+    await onAppendEvents([manualAdvanceEvent({ runnerId: runner, from, to, earned: true })]);
+  };
+
+  // Add or subtract a run
+  const adjustRun = async (delta) => {
+    const lastRunner = runners['3B'] || runners['2B'] || runners['1B'];
+    await onAppendEvents([manualRunEvent({ runnerId: lastRunner?.id || null, earned: true, delta })]);
+  };
+
+  // Mark the most-recently-credited run as unearned (subtract earned run from pitcher)
+  // This is approximated by adding a manual_run with delta=0 + earned=false logic — for now we keep simple:
+  // we expose only delta-based correction.
+
+  return (
+    <div className="manual-adjust">
+      <div className="manual-adjust-header">
+        <span className="manual-adjust-label">MANUAL ADJUSTMENTS</span>
+        <span className="manual-adjust-sub">use when the engine got something wrong</span>
+      </div>
+
+      <div className="manual-adjust-grid">
+        {/* Runner controls */}
+        <div className="manual-adjust-section">
+          <div className="manual-adjust-section-label">RUNNERS</div>
+          {occupied.length === 0 ? (
+            <div className="manual-adjust-empty">No runners on base</div>
+          ) : (
+            <div className="manual-runners-list">
+              {bases.map(b => {
+                const runner = runners[b];
+                if (!runner) return null;
+                return (
+                  <div key={b} className="manual-runner-row">
+                    <div className="manual-runner-name">
+                      <span className="manual-runner-base">{b}</span>
+                      <span>{runner.name.split(' ').pop()}</span>
+                    </div>
+                    <div className="manual-runner-actions">
+                      {b !== '1B' && <button className="manual-btn" onClick={() => move(b, '1B')}>→1B</button>}
+                      {b !== '2B' && <button className="manual-btn" onClick={() => move(b, '2B')}>→2B</button>}
+                      {b !== '3B' && <button className="manual-btn" onClick={() => move(b, '3B')}>→3B</button>}
+                      <button className="manual-btn manual-btn-score" onClick={() => move(b, 'home')}>SCORE</button>
+                      <button className="manual-btn manual-btn-out" onClick={() => move(b, 'out')}>OUT</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Run delta controls */}
+        <div className="manual-adjust-section">
+          <div className="manual-adjust-section-label">RUNS</div>
+          <div className="manual-runs-controls">
+            <button className="manual-btn manual-btn-score" onClick={() => adjustRun(1)}>+1 RUN</button>
+            <button className="manual-btn manual-btn-out" onClick={() => adjustRun(-1)}>−1 RUN</button>
+          </div>
+          <div className="manual-adjust-hint">
+            +1: scored on something engine missed (wild pitch, balk).<br/>
+            −1: engine counted a run that didn't happen.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function Diamond({ runners, battingTeam }) {
