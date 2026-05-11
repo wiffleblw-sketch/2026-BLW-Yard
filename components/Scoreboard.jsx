@@ -8,6 +8,7 @@ import {
   fmtAvg, fmtRate, fmtIp, fmtEra, formatDate,
 } from '../lib/data';
 import { LOGO_DATA_URL, TEAM_LOGOS } from '../lib/logos';
+import LiveScorekeeper from './LiveScorekeeper';
 
 // fmtPct helper (was inline in the artifact)
 const fmtPct = (n) => Number.isFinite(n) ? n.toFixed(1) : '—';
@@ -127,6 +128,23 @@ export default function Scoreboard({ initialData, initialCanEdit }) {
   const setPAsM = useCallback((v) => { setPAs(v); markDirty(); }, [markDirty]);
   const setPitchingM = useCallback((v) => { setPitching(v); markDirty(); }, [markDirty]);
 
+  // Poll for live game status so we can show a LIVE pill in the header & nav
+  const [hasLiveGame, setHasLiveGame] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const r = await fetch('/api/livegame', { cache: 'no-store' });
+        if (!r.ok) return;
+        const { game } = await r.json();
+        if (!cancelled) setHasLiveGame(!!game && game.status === 'live');
+      } catch {}
+    };
+    check();
+    const id = setInterval(check, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
   if (loading) {
     return (
       <div className="loading-screen">
@@ -173,12 +191,15 @@ export default function Scoreboard({ initialData, initialCanEdit }) {
             if (view === 'manage') setView('scores');
           }}
           saving={saving}
+          hasLiveGame={hasLiveGame}
         />
         <main className="main">
           {view === 'scores' && (
             <ScoresView
               teams={teams} players={players} games={games} pas={pas}
               openGame={openGame}
+              hasLiveGame={hasLiveGame}
+              onWatchLive={() => setView('live')}
             />
           )}
           {view === 'batting' && (
@@ -215,6 +236,23 @@ export default function Scoreboard({ initialData, initialCanEdit }) {
               <h2>VIEW MODE</h2>
               <p>Toggle Edit Mode in the header to add games, players, and stats.</p>
             </div>
+          )}
+          {view === 'live' && (
+            <LiveScorekeeper
+              teams={teams}
+              players={players}
+              canEdit={editMode}
+              onClose={() => setView('scores')}
+              onFinalized={async () => {
+                // Reload data after finalize so the new game appears in stats
+                try {
+                  const fresh = await loadDataFromApi();
+                  setTeams(fresh.teams); setPlayers(fresh.players);
+                  setGames(fresh.games); setPAs(fresh.pas); setPitching(fresh.pitching);
+                } catch (e) { console.warn(e); }
+                setView('scores');
+              }}
+            />
           )}
         </main>
         <footer className="app-footer">
@@ -294,10 +332,10 @@ function ScoreTicker({ games, teams, players, pas, openGame }) {
 // HEADER
 // ============================================================
 
-function Header({ view, setView, setSelectedGameId, editMode, onRequestEdit, onLogout, saving }) {
-  const tab = (label, v) => (
+function Header({ view, setView, setSelectedGameId, editMode, onRequestEdit, onLogout, saving, hasLiveGame }) {
+  const tab = (label, v, extraClass = '') => (
     <button
-      className={`nav-tab ${view === v ? 'is-active' : ''}`}
+      className={`nav-tab ${view === v ? 'is-active' : ''} ${extraClass}`}
       onClick={() => { setView(v); if (v !== 'game') setSelectedGameId(null); }}
     >
       {label}
@@ -334,6 +372,15 @@ function Header({ view, setView, setSelectedGameId, editMode, onRequestEdit, onL
       </div>
       <nav className="header-nav">
         <div className="header-nav-inner">
+          {(hasLiveGame || editMode) && (
+            <button
+              className={`nav-tab nav-tab-live ${view === 'live' ? 'is-active' : ''} ${hasLiveGame ? 'is-pulsing' : ''}`}
+              onClick={() => { setView('live'); setSelectedGameId(null); }}
+            >
+              {hasLiveGame && <span className="nav-live-dot"/>}
+              {hasLiveGame ? 'LIVE' : 'Score a Game'}
+            </button>
+          )}
           {tab('Scores', 'scores')}
           {tab('Batting', 'batting')}
           {tab('Pitching', 'pitching')}
@@ -349,8 +396,8 @@ function Header({ view, setView, setSelectedGameId, editMode, onRequestEdit, onL
 // SCORES VIEW (game cards)
 // ============================================================
 
-function ScoresView({ teams, players, games, pas, openGame }) {
-  if (games.length === 0) {
+function ScoresView({ teams, players, games, pas, openGame, hasLiveGame, onWatchLive }) {
+  if (games.length === 0 && !hasLiveGame) {
     return (
       <div className="empty-state-big">
         <h2>NO GAMES YET</h2>
@@ -371,6 +418,16 @@ function ScoresView({ teams, players, games, pas, openGame }) {
   return (
     <div className="scores-view">
       <PageHeader eyebrow={SEASON_LABEL} title="Scoreboard" subtitle="all games · click any matchup for full box score" />
+
+      {hasLiveGame && (
+        <button className="live-banner" onClick={onWatchLive}>
+          <span className="live-banner-dot"/>
+          <span className="live-banner-text">
+            <span className="live-banner-label">LIVE NOW</span>
+            <span className="live-banner-cta">Game in progress · tap to watch →</span>
+          </span>
+        </button>
+      )}
 
       {dates.map(date => (
         <div key={date} className="date-block">
@@ -1381,12 +1438,49 @@ function PitchingEntry({ teams, players, games, pitching, setPitching }) {
 function PlayersManager({ teams, setTeams, players, setPlayers }) {
   const [pForm, setPForm] = useState({ name: '', teamId: teams[0]?.id || '' });
   const [tForm, setTForm] = useState({ name: '', abbr: '', primary: '#1D4ED8', logoKey: '' });
+  const [bulkText, setBulkText] = useState('');
+  const [bulkTeamId, setBulkTeamId] = useState(teams[0]?.id || '');
 
   const addPlayer = () => {
     if (!pForm.name.trim()) return;
     const id = `pl${Date.now()}`;
     setPlayers([...players, { id, name: pForm.name.trim(), teamId: pForm.teamId }]);
     setPForm({ ...pForm, name: '' });
+  };
+
+  const bulkImport = () => {
+    if (!bulkTeamId) return alert('Pick a team for the imported players.');
+    const lines = bulkText
+      .split(/[\n,]/)
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (lines.length === 0) return alert('Paste at least one name (one per line or comma-separated).');
+
+    // Skip names that already exist on this team
+    const existingOnTeam = new Set(
+      players.filter(p => p.teamId === bulkTeamId).map(p => p.name.toLowerCase())
+    );
+    const newPlayers = [];
+    let skipped = 0;
+    lines.forEach((name, i) => {
+      if (existingOnTeam.has(name.toLowerCase())) {
+        skipped++;
+        return;
+      }
+      newPlayers.push({
+        id: `pl${Date.now()}-${i}`,
+        name,
+        teamId: bulkTeamId,
+      });
+    });
+
+    if (newPlayers.length === 0) {
+      alert(`No new players added (${skipped} already exist on this team).`);
+      return;
+    }
+    setPlayers([...players, ...newPlayers]);
+    setBulkText('');
+    alert(`Added ${newPlayers.length} player${newPlayers.length === 1 ? '' : 's'}${skipped ? ` (skipped ${skipped} already on team)` : ''}.`);
   };
 
   const deletePlayer = (id) => {
@@ -1421,18 +1515,20 @@ function PlayersManager({ teams, setTeams, players, setPlayers }) {
           <Field label="Abbreviation (3-4 letters)"><input type="text" value={tForm.abbr} onChange={e => setTForm({...tForm, abbr: e.target.value.toUpperCase().slice(0,4)})} maxLength={4} /></Field>
           <Field label="Primary Color"><input type="color" value={tForm.primary} onChange={e => setTForm({...tForm, primary: e.target.value})} /></Field>
         </div>
-        <div className="presets-block">
-          <div className="presets-label">Quick add (loads name, color & logo):</div>
-          <div className="presets-row">
-            {TEAM_PRESETS.filter(p => !teams.find(t => t.logoKey === p.logoKey)).map(p => (
-              <button key={p.name} className="preset-chip" onClick={() => usePreset(p)} type="button">
-                {TEAM_LOGOS[p.logoKey] && <img src={TEAM_LOGOS[p.logoKey]} alt="" className="preset-chip-logo"/>}
-                <span className="preset-chip-name">{p.name}</span>
-                <span className="preset-chip-swatch" style={{background: p.primary}}/>
-              </button>
-            ))}
+        {TEAM_PRESETS.filter(p => !teams.find(t => t.logoKey === p.logoKey)).length > 0 && (
+          <div className="presets-block">
+            <div className="presets-label">Quick add (loads name, color & logo):</div>
+            <div className="presets-row">
+              {TEAM_PRESETS.filter(p => !teams.find(t => t.logoKey === p.logoKey)).map(p => (
+                <button key={p.name} className="preset-chip" onClick={() => usePreset(p)} type="button">
+                  {TEAM_LOGOS[p.logoKey] && <img src={TEAM_LOGOS[p.logoKey]} alt="" className="preset-chip-logo"/>}
+                  <span className="preset-chip-name">{p.name}</span>
+                  <span className="preset-chip-swatch" style={{background: p.primary}}/>
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
+        )}
         <Field label="Logo">
           <select value={tForm.logoKey} onChange={e => setTForm({...tForm, logoKey: e.target.value})}>
             <option value="">— no logo —</option>
@@ -1454,6 +1550,43 @@ function PlayersManager({ teams, setTeams, players, setPlayers }) {
             <button className="btn btn-danger" onClick={() => { if (confirm(`Delete ${t.name}?`)) setTeams(teams.filter(x => x.id !== t.id)); }}>Delete</button>
           </div>
         ))}
+      </div>
+
+      <div className="card">
+        <div className="card-title">Bulk Import Roster · paste a list of names</div>
+        <p className="card-text">
+          One name per line (or comma-separated). All names get added to the team you pick. Duplicates on that team are skipped.
+        </p>
+        <div className="form-grid">
+          <Field label="Team for these players">
+            <select value={bulkTeamId} onChange={e => setBulkTeamId(e.target.value)}>
+              {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </Field>
+        </div>
+        <Field label="Names" full>
+          <textarea
+            value={bulkText}
+            onChange={e => setBulkText(e.target.value)}
+            rows={6}
+            placeholder={"Randy Dalbey\nJackson Albers\nAneas Sandoval\n..."}
+            style={{
+              width: '100%',
+              minHeight: 140,
+              fontFamily: "'Archivo', sans-serif",
+              fontSize: '0.9rem',
+              padding: '0.625rem 0.75rem',
+              border: '1px solid var(--line)',
+              borderRadius: 6,
+              background: 'var(--bg)',
+              color: 'var(--ink)',
+              resize: 'vertical',
+            }}
+          />
+        </Field>
+        <button className="btn btn-primary" onClick={bulkImport} style={{ marginTop: '0.75rem' }}>
+          Import Roster
+        </button>
       </div>
 
       <div className="card">
