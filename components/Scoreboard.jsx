@@ -9,6 +9,8 @@ import {
 } from '../lib/data';
 import { LOGO_DATA_URL, TEAM_LOGOS } from '../lib/logos';
 import LiveScorekeeper from './LiveScorekeeper';
+import { parseGameScript } from '../lib/parseGame';
+import { createGame, setLineup, setStarter, startGame, computeState, finalizeToSeasonRecords } from '../lib/livegame';
 
 // fmtPct helper (was inline in the artifact)
 const fmtPct = (n) => Number.isFinite(n) ? n.toFixed(1) : '—';
@@ -1171,11 +1173,12 @@ function BoxScorePitching({ team, rows }) {
 // ============================================================
 
 function ManageView({ teams, setTeams, players, setPlayers, games, setGames, pas, setPAs, pitching, setPitching, openGame, resetAll, clearAll }) {
-  const [tab, setTab] = useState('games');
+  const [tab, setTab] = useState('paste');
   return (
     <div className="manage-view">
       <PageHeader eyebrow="ADMIN" title="Manage" subtitle="changes broadcast to everyone viewing this site" />
       <div className="manage-tabs">
+        <button className={`mtab ${tab === 'paste' ? 'is-active' : ''}`} onClick={() => setTab('paste')}>Paste Game</button>
         <button className={`mtab ${tab === 'games' ? 'is-active' : ''}`} onClick={() => setTab('games')}>Games</button>
         <button className={`mtab ${tab === 'pa' ? 'is-active' : ''}`} onClick={() => setTab('pa')}>Add PA</button>
         <button className={`mtab ${tab === 'pitch' ? 'is-active' : ''}`} onClick={() => setTab('pitch')}>Add Pitching</button>
@@ -1183,6 +1186,7 @@ function ManageView({ teams, setTeams, players, setPlayers, games, setGames, pas
         <button className={`mtab ${tab === 'data' ? 'is-active' : ''}`} onClick={() => setTab('data')}>Data</button>
       </div>
 
+      {tab === 'paste' && <PasteGameEntry teams={teams} players={players} games={games} setGames={setGames} pas={pas} setPAs={setPAs} pitching={pitching} setPitching={setPitching} />}
       {tab === 'games' && <GamesManager teams={teams} games={games} setGames={setGames} pas={pas} setPAs={setPAs} pitching={pitching} setPitching={setPitching} openGame={openGame} />}
       {tab === 'pa' && <PAEntry teams={teams} players={players} games={games} pas={pas} setPAs={setPAs} />}
       {tab === 'pitch' && <PitchingEntry teams={teams} players={players} games={games} pitching={pitching} setPitching={setPitching} />}
@@ -1430,6 +1434,268 @@ function PitchingEntry({ teams, players, games, pitching, setPitching }) {
             );
           })}
         </ol>
+      </div>
+    </>
+  );
+}
+
+function PasteGameEntry({ teams, players, games, setGames, pas, setPAs, pitching, setPitching }) {
+  const [text, setText] = useState('');
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [awayTeamId, setAwayTeamId] = useState(teams[0]?.id || '');
+  const [homeTeamId, setHomeTeamId] = useState(teams[1]?.id || teams[0]?.id || '');
+  const [parsed, setParsed] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const handleParse = () => {
+    if (!awayTeamId || !homeTeamId || awayTeamId === homeTeamId) {
+      alert('Pick two different teams (away and home).');
+      return;
+    }
+    if (!text.trim()) {
+      alert('Paste a game script first.');
+      return;
+    }
+    const awayTeam = teams.find(t => t.id === awayTeamId);
+    const homeTeam = teams.find(t => t.id === homeTeamId);
+    const awayRoster = players.filter(p => p.teamId === awayTeamId);
+    const homeRoster = players.filter(p => p.teamId === homeTeamId);
+    const result = parseGameScript({ text, awayTeam, homeTeam, awayRoster, homeRoster, date });
+    setParsed(result);
+  };
+
+  const handleSave = () => {
+    if (!parsed) return;
+    if (parsed.errors.length > 0) {
+      if (!confirm(`There are ${parsed.errors.length} errors. Save anyway?`)) return;
+    }
+
+    // Build the live game object and finalize it
+    const gameId = `g-paste-${Date.now()}`;
+    let g = createGame({
+      id: gameId,
+      awayTeamId: parsed.awayTeamId,
+      homeTeamId: parsed.homeTeamId,
+      date: parsed.date,
+      regulationInnings: 3,
+    });
+    g = setLineup(g, 'away', parsed.awayLineup);
+    g = setLineup(g, 'home', parsed.homeLineup);
+    if (parsed.awayStarter) g = setStarter(g, 'away', parsed.awayStarter);
+    if (parsed.homeStarter) g = setStarter(g, 'home', parsed.homeStarter);
+    g.status = 'live';
+    g.events = parsed.events;
+
+    setBusy(true);
+    try {
+      const { gameRecord, pas: newPAs, pitchingLines } = finalizeToSeasonRecords(g);
+
+      // Set a note based on final score / outcome
+      if (parsed.finalScore) {
+        gameRecord.notes = `Final: ${parsed.finalScore.team || ''} ${parsed.finalScore.score1}-${parsed.finalScore.score2}`.trim();
+      }
+
+      setGames([...games, gameRecord]);
+      setPAs([...pas, ...newPAs]);
+      setPitching([...pitching, ...pitchingLines]);
+      alert(`Game saved! ${newPAs.length} PAs and ${pitchingLines.length} pitching lines added.`);
+      setText('');
+      setParsed(null);
+    } catch (err) {
+      alert('Save failed: ' + err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="card">
+        <div className="card-title">Paste a Game Script</div>
+        <p className="card-text">
+          Paste a game script in the format you already use. Headers like "Top 1" / "Bot 2", then "Player Name: result" lines.
+          Result codes: K, 1B, 2B, 3B, HR, BB, HBP, FC, GO/Groundout, FO/Popout/Flyout, ROE. Add "RBI" or "N RBI" before/after the result.
+          Mention pitchers as "Name Pitching" or "Name comes in". Add a final-score line like "Wolves win 6-0" at the end.
+        </p>
+
+        <div className="form-grid">
+          <Field label="Date">
+            <input type="date" value={date} onChange={e => setDate(e.target.value)} />
+          </Field>
+          <Field label="Away Team">
+            <select value={awayTeamId} onChange={e => setAwayTeamId(e.target.value)}>
+              {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Home Team">
+            <select value={homeTeamId} onChange={e => setHomeTeamId(e.target.value)}>
+              {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </Field>
+        </div>
+
+        <Field label="Game Script" full>
+          <textarea
+            value={text}
+            onChange={e => setText(e.target.value)}
+            rows={14}
+            placeholder={"Top 1\nLuke Rose Pitching\nKeaton Kimmel: K\nMateo Sanchez: 1B\n..."}
+            style={{
+              width: '100%',
+              minHeight: 300,
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: '0.85rem',
+              padding: '0.75rem',
+              border: '1px solid var(--line)',
+              borderRadius: 6,
+              background: 'var(--bg)',
+              color: 'var(--ink)',
+              resize: 'vertical',
+            }}
+          />
+        </Field>
+
+        <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.75rem' }}>
+          <button className="btn btn-primary" onClick={handleParse}>Parse Game →</button>
+          {parsed && <button className="btn btn-ghost" onClick={() => { setParsed(null); }}>Clear preview</button>}
+        </div>
+      </div>
+
+      {parsed && (
+        <PasteGamePreview
+          parsed={parsed}
+          teams={teams}
+          players={players}
+          onSave={handleSave}
+          busy={busy}
+        />
+      )}
+    </>
+  );
+}
+
+function PasteGamePreview({ parsed, teams, players, onSave, busy }) {
+  const awayTeam = teams.find(t => t.id === parsed.awayTeamId);
+  const homeTeam = teams.find(t => t.id === parsed.homeTeamId);
+  const getPlayer = (id) => players.find(p => p.id === id);
+
+  // Compute the final state by replaying events through the state machine
+  // (We use the live engine to validate)
+  let computedScore = null;
+  let isOverState = null;
+  try {
+    let g = createGame({
+      id: 'preview',
+      awayTeamId: parsed.awayTeamId,
+      homeTeamId: parsed.homeTeamId,
+      date: parsed.date,
+      regulationInnings: 3,
+    });
+    g = setLineup(g, 'away', parsed.awayLineup);
+    g = setLineup(g, 'home', parsed.homeLineup);
+    if (parsed.awayStarter) g = setStarter(g, 'away', parsed.awayStarter);
+    if (parsed.homeStarter) g = setStarter(g, 'home', parsed.homeStarter);
+    g.status = 'live';
+    g.events = parsed.events;
+    const state = computeState(g);
+    computedScore = state.score;
+    isOverState = state;
+  } catch (e) {
+    // ignore
+  }
+
+  return (
+    <>
+      {parsed.errors.length > 0 && (
+        <div className="card card-danger">
+          <div className="card-title">⚠ Errors ({parsed.errors.length})</div>
+          <ul style={{ margin: 0, paddingLeft: '1.25rem', lineHeight: 1.6 }}>
+            {parsed.errors.map((e, i) => <li key={i} style={{ color: 'var(--red)' }}>{e}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {parsed.warnings.length > 0 && (
+        <div className="card" style={{ borderColor: 'var(--accent)' }}>
+          <div className="card-title">⚠ Warnings ({parsed.warnings.length})</div>
+          <ul style={{ margin: 0, paddingLeft: '1.25rem', lineHeight: 1.6 }}>
+            {parsed.warnings.map((w, i) => <li key={i} style={{ color: 'var(--accent-2)' }}>{w}</li>)}
+          </ul>
+        </div>
+      )}
+
+      <div className="card">
+        <div className="card-title">Preview · review before saving</div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+          <div>
+            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.7rem', color: 'var(--ink-3)', letterSpacing: '0.1em', marginBottom: '0.4rem' }}>AWAY · {awayTeam?.name}</div>
+            <div style={{ fontWeight: 700, fontSize: '0.95rem', marginBottom: '0.5rem' }}>
+              Lineup: {parsed.awayLineup.map(id => getPlayer(id)?.name.split(' ').pop() || id).join(' → ')}
+            </div>
+            <div style={{ fontSize: '0.85rem', color: 'var(--ink-2)' }}>
+              Starter: {getPlayer(parsed.awayStarter)?.name || '—'}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.7rem', color: 'var(--ink-3)', letterSpacing: '0.1em', marginBottom: '0.4rem' }}>HOME · {homeTeam?.name}</div>
+            <div style={{ fontWeight: 700, fontSize: '0.95rem', marginBottom: '0.5rem' }}>
+              Lineup: {parsed.homeLineup.map(id => getPlayer(id)?.name.split(' ').pop() || id).join(' → ')}
+            </div>
+            <div style={{ fontSize: '0.85rem', color: 'var(--ink-2)' }}>
+              Starter: {getPlayer(parsed.homeStarter)?.name || '—'}
+            </div>
+          </div>
+        </div>
+
+        {computedScore && (
+          <div style={{
+            background: 'var(--bg-alt)',
+            padding: '0.875rem 1rem',
+            borderRadius: 8,
+            marginBottom: '1rem',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: '1rem',
+          }}>
+            <div>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.7rem', color: 'var(--ink-3)', letterSpacing: '0.1em' }}>COMPUTED SCORE</div>
+              <div style={{ fontSize: '1.5rem', fontWeight: 900, fontFamily: "'Archivo', sans-serif" }}>
+                {awayTeam?.abbr} {computedScore.away} — {homeTeam?.abbr} {computedScore.home}
+              </div>
+            </div>
+            {parsed.finalScore && (
+              <div style={{ textAlign: 'right' }}>
+                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.7rem', color: 'var(--ink-3)', letterSpacing: '0.1em' }}>YOU WROTE</div>
+                <div style={{ fontSize: '1.1rem', fontWeight: 700 }}>
+                  {parsed.finalScore.team || ''} {parsed.finalScore.score1}—{parsed.finalScore.score2}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.7rem', color: 'var(--ink-3)', letterSpacing: '0.1em', marginBottom: '0.5rem' }}>
+          ALL PLAYS ({parsed.parsedPlays.length})
+        </div>
+        <div style={{ maxHeight: 320, overflow: 'auto', border: '1px solid var(--line)', borderRadius: 6, padding: '0.5rem 0.75rem', background: 'var(--bg-alt)' }}>
+          {parsed.parsedPlays.map((p, i) => (
+            <div key={i} style={{ display: 'flex', gap: '0.5rem', padding: '0.3rem 0', borderBottom: i < parsed.parsedPlays.length - 1 ? '1px dashed var(--line-soft)' : 'none', fontSize: '0.85rem' }}>
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.7rem', color: 'var(--ink-3)', minWidth: '2.5rem' }}>{p.half}{p.inning}</span>
+              <span style={{ fontWeight: 600, flex: 1 }}>{p.batterName}</span>
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, color: 'var(--navy)' }}>{p.result}</span>
+              {p.rbi > 0 && <span style={{ fontSize: '0.75rem', background: 'var(--accent)', color: 'var(--ink)', padding: '0.1rem 0.4rem', borderRadius: 3, fontWeight: 700 }}>{p.rbi} RBI</span>}
+              {p.notes && <span style={{ fontSize: '0.75rem', color: 'var(--ink-3)', fontStyle: 'italic' }}>· {p.notes}</span>}
+            </div>
+          ))}
+        </div>
+
+        <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'flex-end', gap: '0.5rem' }}>
+          <button className="btn btn-primary" onClick={onSave} disabled={busy || parsed.parsedPlays.length === 0}>
+            {busy ? 'Saving…' : '✓ Save Game to Stats'}
+          </button>
+        </div>
       </div>
     </>
   );
