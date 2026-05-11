@@ -1187,7 +1187,7 @@ function ManageView({ teams, setTeams, players, setPlayers, games, setGames, pas
       </div>
 
       {tab === 'paste' && <PasteGameEntry teams={teams} players={players} games={games} setGames={setGames} pas={pas} setPAs={setPAs} pitching={pitching} setPitching={setPitching} />}
-      {tab === 'games' && <GamesManager teams={teams} games={games} setGames={setGames} pas={pas} setPAs={setPAs} pitching={pitching} setPitching={setPitching} openGame={openGame} />}
+      {tab === 'games' && <GamesManager teams={teams} players={players} games={games} setGames={setGames} pas={pas} setPAs={setPAs} pitching={pitching} setPitching={setPitching} openGame={openGame} />}
       {tab === 'pa' && <PAEntry teams={teams} players={players} games={games} pas={pas} setPAs={setPAs} />}
       {tab === 'pitch' && <PitchingEntry teams={teams} players={players} games={games} pitching={pitching} setPitching={setPitching} />}
       {tab === 'players' && <PlayersManager teams={teams} setTeams={setTeams} players={players} setPlayers={setPlayers} />}
@@ -1196,7 +1196,7 @@ function ManageView({ teams, setTeams, players, setPlayers, games, setGames, pas
   );
 }
 
-function GamesManager({ teams, games, setGames, pas, setPAs, pitching, setPitching, openGame }) {
+function GamesManager({ teams, players, games, setGames, pas, setPAs, pitching, setPitching, openGame }) {
   const [form, setForm] = useState({
     date: new Date().toISOString().slice(0, 10),
     awayTeamId: teams[0]?.id || '',
@@ -1205,6 +1205,7 @@ function GamesManager({ teams, games, setGames, pas, setPAs, pitching, setPitchi
     status: 'final',
     notes: '',
   });
+  const [editingGameId, setEditingGameId] = useState(null);
 
   const addGame = () => {
     if (!form.awayTeamId || !form.homeTeamId) return alert('Pick both teams.');
@@ -1220,6 +1221,19 @@ function GamesManager({ teams, games, setGames, pas, setPAs, pitching, setPitchi
     setPAs(pas.filter(p => p.gameId !== id));
     setPitching(pitching.filter(p => p.gameId !== id));
   };
+
+  if (editingGameId) {
+    return (
+      <GameEditor
+        gameId={editingGameId}
+        teams={teams} players={players}
+        games={games} setGames={setGames}
+        pas={pas} setPAs={setPAs}
+        pitching={pitching} setPitching={setPitching}
+        onClose={() => setEditingGameId(null)}
+      />
+    );
+  }
 
   return (
     <>
@@ -1262,7 +1276,8 @@ function GamesManager({ teams, games, setGames, pas, setPAs, pitching, setPitchi
                 <div className="list-row-meta">{g.date}{g.innings > 3 ? ` · ${g.innings - 3} extra inn` : ''} · {g.status}</div>
               </div>
               <div className="list-row-actions">
-                <button className="btn btn-ghost" onClick={() => openGame(g.id)}>Box Score →</button>
+                <button className="btn btn-ghost" onClick={() => openGame(g.id)}>Box Score</button>
+                <button className="btn btn-primary" onClick={() => setEditingGameId(g.id)}>Edit</button>
                 <button className="btn btn-danger" onClick={() => deleteGame(g.id)}>Delete</button>
               </div>
             </div>
@@ -1272,6 +1287,276 @@ function GamesManager({ teams, games, setGames, pas, setPAs, pitching, setPitchi
     </>
   );
 }
+
+// ============================================================
+// GAME EDITOR — edit metadata, plays, and pitching lines for one game
+// ============================================================
+
+function GameEditor({ gameId, teams, players, games, setGames, pas, setPAs, pitching, setPitching, onClose }) {
+  const game = games.find(g => g.id === gameId);
+  if (!game) {
+    return <div className="card"><div className="card-title">Game not found</div><button className="btn" onClick={onClose}>Back</button></div>;
+  }
+
+  const gamePAs = pas.filter(p => p.gameId === gameId).sort((a, b) => {
+    if (a.inning !== b.inning) return a.inning - b.inning;
+    if (a.half !== b.half) return a.half === 'T' ? -1 : 1;
+    return 0;
+  });
+  const gamePitching = pitching.filter(p => p.gameId === gameId);
+
+  const away = teams.find(t => t.id === game.awayTeamId);
+  const home = teams.find(t => t.id === game.homeTeamId);
+  const getPlayer = (id) => players.find(p => p.id === id);
+  const teamPlayers = (teamId) => players.filter(p => p.teamId === teamId);
+
+  // Compute current score from PAs
+  const awayR = gamePAs.filter(p => getPlayer(p.batterId)?.teamId === game.awayTeamId).reduce((s,p) => s + Number(p.runs||0), 0);
+  const homeR = gamePAs.filter(p => getPlayer(p.batterId)?.teamId === game.homeTeamId).reduce((s,p) => s + Number(p.runs||0), 0);
+
+  // Game metadata updates
+  const updateGame = (changes) => {
+    setGames(games.map(g => g.id === gameId ? { ...g, ...changes } : g));
+  };
+
+  // PA updates
+  const updatePA = (paId, changes) => {
+    setPAs(pas.map(p => p.id === paId ? { ...p, ...changes } : p));
+  };
+  const deletePA = (paId) => {
+    if (!confirm('Delete this play?')) return;
+    setPAs(pas.filter(p => p.id !== paId));
+  };
+
+  // Pitching line updates
+  const updatePitching = (pitId, changes) => {
+    setPitching(pitching.map(p => p.id === pitId ? { ...p, ...changes } : p));
+  };
+  const deletePitching = (pitId) => {
+    if (!confirm('Delete this pitching line?')) return;
+    setPitching(pitching.filter(p => p.id !== pitId));
+  };
+  const addPitchingLine = () => {
+    const newId = `pit-${Date.now()}`;
+    setPitching([...pitching, {
+      id: newId, gameId, pitcherId: '', gs: 0, ip: 0, r: 0, er: 0, h: 0, bb: 0, k: 0, hr: 0, cg: 0, w: 0, l: 0, s: 0, notes: '',
+    }]);
+  };
+
+  return (
+    <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1rem' }}>
+        <button className="btn btn-ghost" onClick={onClose}>← Back to Games</button>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: '1.25rem' }}>
+            {away?.abbr} {awayR} — {homeR} {home?.abbr}
+          </div>
+          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.7rem', color: 'var(--ink-3)', letterSpacing: '0.1em' }}>
+            EDITING · {game.date}
+          </div>
+        </div>
+      </div>
+
+      {/* Game metadata */}
+      <div className="card">
+        <div className="card-title">Game Info</div>
+        <div className="form-grid">
+          <Field label="Date">
+            <input type="date" value={game.date} onChange={e => updateGame({ date: e.target.value })} />
+          </Field>
+          <Field label="Away Team">
+            <select value={game.awayTeamId} onChange={e => updateGame({ awayTeamId: e.target.value })}>
+              {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Home Team">
+            <select value={game.homeTeamId} onChange={e => updateGame({ homeTeamId: e.target.value })}>
+              {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Innings (regulation = 3)">
+            <input type="number" min="1" max="20" value={game.innings} onChange={e => updateGame({ innings: Number(e.target.value) })} />
+          </Field>
+          <Field label="Status">
+            <select value={game.status} onChange={e => updateGame({ status: e.target.value })}>
+              <option value="final">Final</option>
+              <option value="partial">Partial</option>
+              <option value="in-progress">In Progress</option>
+            </select>
+          </Field>
+          <Field label="Notes" full>
+            <input type="text" value={game.notes || ''} onChange={e => updateGame({ notes: e.target.value })} />
+          </Field>
+        </div>
+      </div>
+
+      {/* PAs */}
+      <div className="card">
+        <div className="card-title">Plays ({gamePAs.length}) · edit RBI, runs, result, or delete</div>
+        <p className="card-text">
+          Changes save automatically. The final score is computed from each play's "Run" field — toggle that to fix the score.
+        </p>
+
+        <div style={{ maxHeight: 500, overflow: 'auto', border: '1px solid var(--line)', borderRadius: 6 }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+            <thead style={{ background: 'var(--bg-alt)', position: 'sticky', top: 0 }}>
+              <tr>
+                <th style={{ padding: '0.5rem', textAlign: 'left', borderBottom: '1px solid var(--line)' }}>Inn</th>
+                <th style={{ padding: '0.5rem', textAlign: 'left', borderBottom: '1px solid var(--line)' }}>Batter</th>
+                <th style={{ padding: '0.5rem', borderBottom: '1px solid var(--line)' }}>Result</th>
+                <th style={{ padding: '0.5rem', borderBottom: '1px solid var(--line)' }}>RBI</th>
+                <th style={{ padding: '0.5rem', borderBottom: '1px solid var(--line)' }}>Run</th>
+                <th style={{ padding: '0.5rem', textAlign: 'left', borderBottom: '1px solid var(--line)' }}>Notes</th>
+                <th style={{ padding: '0.5rem', borderBottom: '1px solid var(--line)' }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {gamePAs.map(p => {
+                const batter = getPlayer(p.batterId);
+                return (
+                  <tr key={p.id} style={{ borderBottom: '1px solid var(--line-soft)' }}>
+                    <td style={{ padding: '0.4rem 0.5rem', fontFamily: "'JetBrains Mono', monospace", fontSize: '0.78rem' }}>
+                      {p.half}{p.inning}
+                    </td>
+                    <td style={{ padding: '0.4rem 0.5rem', fontWeight: 600 }}>
+                      {batter?.name || p.batterId}
+                    </td>
+                    <td style={{ padding: '0.3rem 0.4rem' }}>
+                      <select value={p.result} onChange={e => updatePA(p.id, { result: e.target.value })} style={editorSelect}>
+                        {RESULT_CODES.map(c => <option key={c.code} value={c.code}>{c.code}</option>)}
+                      </select>
+                    </td>
+                    <td style={{ padding: '0.3rem 0.4rem' }}>
+                      <input type="number" min="0" max="4" value={p.rbi || 0} onChange={e => updatePA(p.id, { rbi: Number(e.target.value) })} style={editorNum}/>
+                    </td>
+                    <td style={{ padding: '0.3rem 0.4rem' }}>
+                      <input type="number" min="0" max="1" value={p.runs || 0} onChange={e => updatePA(p.id, { runs: Number(e.target.value) })} style={editorNum}/>
+                    </td>
+                    <td style={{ padding: '0.3rem 0.4rem' }}>
+                      <input type="text" value={p.notes || ''} onChange={e => updatePA(p.id, { notes: e.target.value })} style={editorText}/>
+                    </td>
+                    <td style={{ padding: '0.3rem 0.4rem' }}>
+                      <button className="btn-x" onClick={() => deletePA(p.id)}>×</button>
+                    </td>
+                  </tr>
+                );
+              })}
+              {gamePAs.length === 0 && (
+                <tr><td colSpan={7} style={{ padding: '1.5rem', textAlign: 'center', color: 'var(--ink-3)', fontStyle: 'italic' }}>No plays recorded for this game.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Pitching */}
+      <div className="card">
+        <div className="card-title">Pitching Lines ({gamePitching.length})</div>
+        <p className="card-text">
+          IP uses baseball notation: 4.1 = 4⅓ innings, 4.2 = 4⅔.
+        </p>
+
+        <div style={{ overflowX: 'auto', border: '1px solid var(--line)', borderRadius: 6 }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem' }}>
+            <thead style={{ background: 'var(--bg-alt)' }}>
+              <tr>
+                <th style={{ padding: '0.5rem', textAlign: 'left', borderBottom: '1px solid var(--line)' }}>Pitcher</th>
+                <th style={{ padding: '0.5rem', borderBottom: '1px solid var(--line)' }}>GS</th>
+                <th style={{ padding: '0.5rem', borderBottom: '1px solid var(--line)' }}>IP</th>
+                <th style={{ padding: '0.5rem', borderBottom: '1px solid var(--line)' }}>H</th>
+                <th style={{ padding: '0.5rem', borderBottom: '1px solid var(--line)' }}>R</th>
+                <th style={{ padding: '0.5rem', borderBottom: '1px solid var(--line)' }}>ER</th>
+                <th style={{ padding: '0.5rem', borderBottom: '1px solid var(--line)' }}>BB</th>
+                <th style={{ padding: '0.5rem', borderBottom: '1px solid var(--line)' }}>K</th>
+                <th style={{ padding: '0.5rem', borderBottom: '1px solid var(--line)' }}>HR</th>
+                <th style={{ padding: '0.5rem', borderBottom: '1px solid var(--line)' }}>W</th>
+                <th style={{ padding: '0.5rem', borderBottom: '1px solid var(--line)' }}>L</th>
+                <th style={{ padding: '0.5rem', borderBottom: '1px solid var(--line)' }}>SV</th>
+                <th style={{ padding: '0.5rem', borderBottom: '1px solid var(--line)' }}>CG</th>
+                <th style={{ padding: '0.5rem', borderBottom: '1px solid var(--line)' }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {gamePitching.map(p => {
+                const pitcher = getPlayer(p.pitcherId);
+                const pitcherTeam = pitcher?.teamId;
+                const eligiblePitchers = [
+                  ...teamPlayers(game.awayTeamId),
+                  ...teamPlayers(game.homeTeamId),
+                ];
+                return (
+                  <tr key={p.id} style={{ borderBottom: '1px solid var(--line-soft)' }}>
+                    <td style={{ padding: '0.3rem 0.4rem' }}>
+                      <select value={p.pitcherId} onChange={e => updatePitching(p.id, { pitcherId: e.target.value })} style={{...editorSelect, minWidth: 130}}>
+                        <option value="">— pick —</option>
+                        {eligiblePitchers.map(pl => <option key={pl.id} value={pl.id}>{pl.name}</option>)}
+                      </select>
+                    </td>
+                    <td><input type="number" min="0" max="1" value={p.gs || 0} onChange={e => updatePitching(p.id, { gs: Number(e.target.value) })} style={editorNum}/></td>
+                    <td><input type="number" step="0.1" min="0" value={p.ip || 0} onChange={e => updatePitching(p.id, { ip: Number(e.target.value) })} style={editorNum}/></td>
+                    <td><input type="number" min="0" value={p.h || 0} onChange={e => updatePitching(p.id, { h: Number(e.target.value) })} style={editorNum}/></td>
+                    <td><input type="number" min="0" value={p.r || 0} onChange={e => updatePitching(p.id, { r: Number(e.target.value) })} style={editorNum}/></td>
+                    <td><input type="number" min="0" value={p.er || 0} onChange={e => updatePitching(p.id, { er: Number(e.target.value) })} style={editorNum}/></td>
+                    <td><input type="number" min="0" value={p.bb || 0} onChange={e => updatePitching(p.id, { bb: Number(e.target.value) })} style={editorNum}/></td>
+                    <td><input type="number" min="0" value={p.k || 0} onChange={e => updatePitching(p.id, { k: Number(e.target.value) })} style={editorNum}/></td>
+                    <td><input type="number" min="0" value={p.hr || 0} onChange={e => updatePitching(p.id, { hr: Number(e.target.value) })} style={editorNum}/></td>
+                    <td><input type="number" min="0" max="1" value={p.w || 0} onChange={e => updatePitching(p.id, { w: Number(e.target.value) })} style={editorNum}/></td>
+                    <td><input type="number" min="0" max="1" value={p.l || 0} onChange={e => updatePitching(p.id, { l: Number(e.target.value) })} style={editorNum}/></td>
+                    <td><input type="number" min="0" max="1" value={p.s || 0} onChange={e => updatePitching(p.id, { s: Number(e.target.value) })} style={editorNum}/></td>
+                    <td><input type="number" min="0" max="1" value={p.cg || 0} onChange={e => updatePitching(p.id, { cg: Number(e.target.value) })} style={editorNum}/></td>
+                    <td><button className="btn-x" onClick={() => deletePitching(p.id)}>×</button></td>
+                  </tr>
+                );
+              })}
+              {gamePitching.length === 0 && (
+                <tr><td colSpan={14} style={{ padding: '1.5rem', textAlign: 'center', color: 'var(--ink-3)', fontStyle: 'italic' }}>No pitching lines.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ marginTop: '0.75rem' }}>
+          <button className="btn btn-ghost" onClick={addPitchingLine}>+ Add pitching line</button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// Inline editor styles
+const editorSelect = {
+  padding: '0.3rem 0.5rem',
+  fontFamily: "'Archivo', sans-serif",
+  fontSize: '0.82rem',
+  border: '1px solid var(--line)',
+  borderRadius: 4,
+  background: 'var(--bg)',
+  color: 'var(--ink)',
+  outline: 'none',
+};
+const editorNum = {
+  padding: '0.3rem 0.5rem',
+  width: 56,
+  fontFamily: "'JetBrains Mono', monospace",
+  fontSize: '0.82rem',
+  border: '1px solid var(--line)',
+  borderRadius: 4,
+  background: 'var(--bg)',
+  color: 'var(--ink)',
+  outline: 'none',
+  textAlign: 'center',
+};
+const editorText = {
+  padding: '0.3rem 0.5rem',
+  minWidth: 140,
+  width: '100%',
+  fontFamily: "'Archivo', sans-serif",
+  fontSize: '0.82rem',
+  border: '1px solid var(--line)',
+  borderRadius: 4,
+  background: 'var(--bg)',
+  color: 'var(--ink)',
+  outline: 'none',
+};
 
 function PAEntry({ teams, players, games, pas, setPAs }) {
   const [form, setForm] = useState({
